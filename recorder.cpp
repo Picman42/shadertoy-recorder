@@ -9,7 +9,7 @@
 #include <vector>
 #include <map>
 #define STB_IMAGE_WRITE_IMPLEMENTATION
-#include "std_image/stb_image_write.h"
+#include "stb_image/stb_image_write.h"
 
 int width = 1920;
 int height = 1080;
@@ -66,7 +66,6 @@ GLuint createShaderProgram(const std::string& shaderFile) {
     return shaderProgram;
 }
 
-// 保存帧为图像
 bool saveFrameAsImage(const std::string& filename) {
     std::vector<unsigned char> pixels(width * height * 3);  // RGB
     glReadPixels(0, 0, width, height, GL_RGB, GL_UNSIGNED_BYTE, pixels.data());
@@ -74,15 +73,27 @@ bool saveFrameAsImage(const std::string& filename) {
     return stbi_write_png(filename.c_str(), width, height, 3, pixels.data(), width * 3);
 }
 
+bool saveFrameAsImageWithAlpha(const std::string& filename) {
+    std::vector<unsigned char> pixels(width * height * 4);  // RGBA
+    glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+
+    return stbi_write_png(filename.c_str(), width, height, 4, pixels.data(), width * 4);
+}
+
 void parse_arguments(int argc, char* argv[], std::map<std::string, std::string>& params) {
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
         if (arg.substr(0, 2) == "--") {
             std::string key = arg.substr(2);
+            if (key == "norender") {
+                params[key] = "";
+                continue;
+            }
             if (i + 1 < argc && argv[i + 1][0] != '-') {
                 params[key] = argv[i + 1];
                 i++;
-            } else {
+            }
+            else {
                 params[key] = "";
             }
         }
@@ -103,15 +114,19 @@ int main(int argc, char* argv[]) {
     std::string outputPath = params.count("output") ? params["output"] : ".";
     float frameRate = params.count("fps") ? std::stof(params["fps"]) : 30.0f;
     int frameNum = params.count("count") ? std::stoi(params["count"]) : 30;
+    int startingFrame = params.count("startframe") ? std::stoi(params["startframe"]) : 0;
     width = params.count("width") ? std::stoi(params["width"]) : 1920;
     height = params.count("height") ? std::stoi(params["height"]) : 1080;
+    bool save = params.count("norender") == 0;
 
     std::cout << "Shader file: " << shaderFile << std::endl;
     std::cout << "Output path: " << outputPath << std::endl;
     std::cout << "Framerate: " << frameRate << std::endl;
     std::cout << "Frame count: " << frameNum << std::endl;
+    std::cout << "Starting frame: " << startingFrame << std::endl;
     std::cout << "Width: " << width << std::endl;
     std::cout << "Height: " << height << std::endl;
+    std::cout << "Rendering: " << (save ? "Yes" : "No") << std::endl;
 
     if (!glfwInit()) {
         std::cerr << "ERROR: Failed to initialize GLFW" << std::endl;
@@ -135,7 +150,6 @@ int main(int argc, char* argv[]) {
         return -1;
     }
 
-    // 创建Shader程序
     GLuint shaderProgram = createShaderProgram(shaderFile);
 
     GLint resolutionLoc = glGetUniformLocation(shaderProgram, "iResolution");
@@ -143,7 +157,7 @@ int main(int argc, char* argv[]) {
     GLint frameLoc = glGetUniformLocation(shaderProgram, "iFrame");
     GLint framerateLoc = glGetUniformLocation(shaderProgram, "iFramerate");
 
-    float resolution[3] = {static_cast<float>(width), static_cast<float>(height), 0};
+    float resolution[3] = { static_cast<float>(width), static_cast<float>(height), 0 };
 
     float vertices[] = {
         -1.0f, -1.0f,   0.0f, 0.0f,  // aPos, aTexcoord
@@ -177,11 +191,26 @@ int main(int argc, char* argv[]) {
     glBindBuffer(GL_ARRAY_BUFFER, 0);
     glBindVertexArray(0);
 
-    // 渲染循环
-    int frame = 0;
-    while (!glfwWindowShouldClose(window) && frame < frameNum) {
-        glClear(GL_COLOR_BUFFER_BIT);
+    GLuint framebuffer, texture;
+    glGenFramebuffers(1, &framebuffer);
+    glGenTextures(1, &texture);
 
+    glBindTexture(GL_TEXTURE_2D, texture);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture, 0);
+
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+        std::cerr << "ERROR: Framebuffer not complete!" << std::endl;
+        return -1;
+    }
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+    int frame = startingFrame;
+    while (!glfwWindowShouldClose(window) && (frame < startingFrame + frameNum || !save)) {
         glUseProgram(shaderProgram);
 
         glUniform3fv(resolutionLoc, 1, resolution);
@@ -190,19 +219,27 @@ int main(int argc, char* argv[]) {
         glUniform1i(frameLoc, frame);
 
         glBindVertexArray(VAO);
-        glDrawArrays(GL_TRIANGLES, 0, 6);
 
-        std::ostringstream oss;
-        oss << std::setw(4) << std::setfill('0') << frame++;
-        std::string filename = outputPath + "/frame_" + oss.str() + ".png";
+        if (save) {
+            glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
+            glClear(GL_COLOR_BUFFER_BIT);
+            glDrawArrays(GL_TRIANGLES, 0, 6);
+            std::ostringstream oss;
+            oss << std::setw(4) << std::setfill('0') << frame;
+            std::string filename = outputPath + "/frame_" + oss.str() + ".png";
 
-        std::cout << "Writing Frame " << frame-1 << " to file " << filename << "..." << std::endl;
+            std::cout << "Writing Frame " << frame << " to file " << filename << "..." << std::endl;
 
-        bool res = saveFrameAsImage(filename);
-        if (!res) {
-            std::cout << "ERROR: Image writing failed!" << std::endl;
-            return -1;
+            bool res = saveFrameAsImageWithAlpha(filename);
+            if (!res) {
+                std::cout << "ERROR: Image writing failed!" << std::endl;
+                return -1;
+            }
         }
+
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glDrawArrays(GL_TRIANGLES, 0, 6);
+        frame++;
 
         glfwSwapBuffers(window);
         glfwPollEvents();
